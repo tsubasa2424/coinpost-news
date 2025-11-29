@@ -1,30 +1,30 @@
 # main.py
-# CoinPostニュース自動取得 → AI要約（gpt-4o-mini） → SQLite保存 → /news で提供
-# 依存: fastapi, feedparser, httpx, selectolax, sqlalchemy, openai, uvicorn
+# ニュース自動取得 → GPT要約 → 保存 → 配信（Render/Railway対応）
 
 import os
 import feedparser
 import httpx
 from fastapi import FastAPI
 from selectolax.parser import HTMLParser
-from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
+from datetime import datetime
 from openai import OpenAI
 
-# -----------------------------
+# --------------------------
 # 設定
-# -----------------------------
+# --------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-DATABASE_URL = "sqlite:///news.db"
-COINPOST_RSS = "https://coinpost.jp/?feed=rss2"
+NEWS_RSS = "https://coinpost.jp/?feed=rss2"
 
-# -----------------------------
-# DB設定
-# -----------------------------
-engine = create_engine(DATABASE_URL, echo=False, future=True)
+DATABASE_URL = "sqlite:///news.db"
+
+# --------------------------
+# DB（SQLite）
+# --------------------------
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -38,12 +38,12 @@ class News(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# -----------------------------
-# AI要約
-# -----------------------------
+# --------------------------
+# 要約関数（GPT）
+# --------------------------
 def summarize(text: str) -> str:
     prompt = f"""
-以下のCoinPostニュースを300字以内で重要ポイントだけ日本語で要約してください。
+以下のニュースを300字以内で重要部分だけ日本語で要約してください：
 
 {text}
 """
@@ -51,56 +51,70 @@ def summarize(text: str) -> str:
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
     )
-    return res.choices[0].message["content"]
+    return res.choices[0].message['content']
 
-# -----------------------------
-# CoinPost記事本文抽出
-# -----------------------------
+# --------------------------
+# 記事本文抽出
+# --------------------------
 async def fetch_article(url: str) -> str:
     async with httpx.AsyncClient() as client:
-        r = await client.get(url, timeout=15)
+        r = await client.get(url, timeout=10)
         html = HTMLParser(r.text)
-
         paragraphs = [p.text().strip() for p in html.css("p")]
-        text = "\n".join(paragraphs)
-        return text
+        return "\n".join(paragraphs)
 
-# -----------------------------
-# CoinPost RSS → 要約して保存
-# -----------------------------
-async def update_coinpost():
+# --------------------------
+# ニュース更新処理
+# --------------------------
+async def update_news_data():
     db = SessionLocal()
-    rss = feedparser.parse(COINPOST_RSS)
+    rss = feedparser.parse(NEWS_RSS)
 
     for entry in rss.entries[:5]:  # 最新5件
-        if db.query(News).filter(News.url == entry.link).first():
+        exists = db.query(News).filter(News.url == entry.link).first()
+        if exists:
             continue
 
-        article_text = await fetch_article(entry.link)
-        summary = summarize(article_text)
+        text = await fetch_article(entry.link)
+        summary = summarize(text)
 
-        item = News(
+        news = News(
             title=entry.title,
             url=entry.link,
-            summary=summary,
+            summary=summary
         )
-        db.add(item)
+        db.add(news)
         db.commit()
 
     db.close()
 
-# -----------------------------
-# FastAPI
-# -----------------------------
+# --------------------------
+# LINE通知（任意）
+# --------------------------
+async def notify_line(message: str):
+    token = os.getenv("LINE_NOTIFY_TOKEN")
+    if not token:
+        return
+
+    url = "https://notify-api.line.me/api/notify"
+    headers = {"Authorization": f"Bearer {token}"}
+    data = {"message": message}
+
+    async with httpx.AsyncClient() as client:
+        await client.post(url, headers=headers, data=data)
+
+# --------------------------
+# FastAPI（Public）
+# --------------------------
 app = FastAPI()
 
 @app.get("/")
 def home():
-    return {"message": "CoinPost News Summarizer API (GPT-4o-mini)"}
+    return {"message": "News Auto Summarizer API (GPT-4o-mini)"}
 
 @app.get("/update")
 async def update():
-    await update_coinpost()
+    await update_news_data()
     return {"status": "updated"}
 
 @app.get("/news")
@@ -108,13 +122,25 @@ def get_news():
     db = SessionLocal()
     rows = db.query(News).order_by(News.id.desc()).all()
     db.close()
-
     return [
         {
-            "title": n.title,
-            "url": n.url,
-            "summary": n.summary,
-            "created_at": n.created_at,
+            "title": r.title,
+            "url": r.url,
+            "summary": r.summary,
+            "created_at": r.created_at,
         }
-        for n in rows
+        for r in rows
     ]
+
+@app.get("/notify")
+async def notify():
+    db = SessionLocal()
+    rows = db.query(News).order_by(News.id.desc()).limit(5).all()
+    db.close()
+
+    msg = "📰【最新ニュース要約】\n\n"
+    for n in rows:
+        msg += f"■ {n.title}\n{n.summary}\n{n.url}\n\n"
+
+    await notify_line(msg)
+    return {"status": "sent"}
