@@ -1,5 +1,6 @@
 # main.py
-# URLを開いた瞬間にニュースを自動要約して表示するバージョン
+# Gemini (Google AI) 版：ニュースを自動取得→要約→表示
+# OpenAI不要・無料枠で動作
 
 import os
 import feedparser
@@ -9,18 +10,21 @@ from selectolax.parser import HTMLParser
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
-from openai import OpenAI
+import google.generativeai as genai
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ========= Google Gemini 設定 =========
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
+MODEL = genai.GenerativeModel("gemini-1.5-flash")  # 無料で高速
 
+# ========= 設定 =========
 NEWS_RSS = "https://coinpost.jp/?feed=rss2"
 DATABASE_URL = "sqlite:///news.db"
 
+# ========= DB =========
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
-
 
 class News(Base):
     __tablename__ = "news"
@@ -30,23 +34,20 @@ class News(Base):
     summary = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
 Base.metadata.create_all(bind=engine)
 
-
-def summarize(text: str) -> str:
+# ========= 要約（Gemini） =========
+def summarize_with_gemini(text: str) -> str:
     prompt = f"""
-以下のニュースを300字以内で重要部分だけ日本語で要約してください：
+以下のニュース記事を300字以内で分かりやすく日本語要約してください。
 
 {text}
 """
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return res.choices[0].message["content"]
+    response = MODEL.generate_content(prompt)
+    return response.text
 
 
+# ========= 本文抽出 =========
 async def fetch_article(url: str) -> str:
     async with httpx.AsyncClient() as client:
         r = await client.get(url, timeout=10)
@@ -55,22 +56,23 @@ async def fetch_article(url: str) -> str:
         return "\n".join(paragraphs)
 
 
-async def update_news_data():
+# ========= ニュース取得と要約 =========
+async def update_news():
     db = SessionLocal()
     rss = feedparser.parse(NEWS_RSS)
 
-    for entry in rss.entries[:5]:
+    for entry in rss.entries[:5]:  # 最新5件
         exists = db.query(News).filter(News.url == entry.link).first()
         if exists:
             continue
 
         text = await fetch_article(entry.link)
-        summary = summarize(text)
+        summary = summarize_with_gemini(text)
 
         news = News(
             title=entry.title,
             url=entry.link,
-            summary=summary
+            summary=summary,
         )
         db.add(news)
         db.commit()
@@ -78,18 +80,14 @@ async def update_news_data():
     db.close()
 
 
-# ======================
-# FastAPI
-# ======================
+# ========= FastAPI =========
 app = FastAPI()
 
-
 @app.get("/")
-async def home():
-    # ① 開いた瞬間にニュースを更新
-    await update_news_data()
+async def auto_news():
+    """アクセスした瞬間に自動で要約を生成し、そのまま返す"""
+    await update_news()
 
-    # ② 最新ニュースを DB から取得してそのまま返す
     db = SessionLocal()
     rows = db.query(News).order_by(News.id.desc()).limit(5).all()
     db.close()
@@ -99,7 +97,7 @@ async def home():
             "title": r.title,
             "summary": r.summary,
             "url": r.url,
-            "created_at": r.created_at
+            "created_at": r.created_at,
         }
         for r in rows
     ]
