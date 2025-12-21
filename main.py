@@ -1,6 +1,5 @@
 # main.py
-# Gemini (Google AI) 版：ニュースを自動取得→要約→表示
-# OpenAI不要・無料枠で動作
+# URLを開いた瞬間に CoinPost ニュースを自動取得 → Gemini が要約して返す
 
 import os
 import feedparser
@@ -15,17 +14,22 @@ import google.generativeai as genai
 # ========= Google Gemini 設定 =========
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL = genai.GenerativeModel("gemini-1.5-flash")  # 無料で高速
 
-# ========= 設定 =========
+# Render の google-generativeai は v1beta互換 → gemini-pro が最も確実に動く
+MODEL = genai.GenerativeModel("gemini-pro")
+
+# ========= ニュースRSS =========
 NEWS_RSS = "https://coinpost.jp/?feed=rss2"
+
+# ========= SQLite 設定 =========
 DATABASE_URL = "sqlite:///news.db"
 
-# ========= DB =========
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
+
+# ========= DBモデル =========
 class News(Base):
     __tablename__ = "news"
     id = Column(Integer, primary_key=True)
@@ -34,12 +38,14 @@ class News(Base):
     summary = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
 Base.metadata.create_all(bind=engine)
 
-# ========= 要約（Gemini） =========
+
+# ========= Gemini 要約 =========
 def summarize_with_gemini(text: str) -> str:
     prompt = f"""
-以下のニュース記事を300字以内で分かりやすく日本語要約してください。
+以下のニュースを300字以内で重要ポイントだけ日本語で要約してください。
 
 {text}
 """
@@ -47,7 +53,7 @@ def summarize_with_gemini(text: str) -> str:
     return response.text
 
 
-# ========= 本文抽出 =========
+# ========= CoinPostの記事本文抽出 =========
 async def fetch_article(url: str) -> str:
     async with httpx.AsyncClient() as client:
         r = await client.get(url, timeout=10)
@@ -56,12 +62,12 @@ async def fetch_article(url: str) -> str:
         return "\n".join(paragraphs)
 
 
-# ========= ニュース取得と要約 =========
+# ========= ニュース取得＋要約＋保存 =========
 async def update_news():
     db = SessionLocal()
     rss = feedparser.parse(NEWS_RSS)
 
-    for entry in rss.entries[:5]:  # 最新5件
+    for entry in rss.entries[:5]:  # 最新5件だけ取得
         exists = db.query(News).filter(News.url == entry.link).first()
         if exists:
             continue
@@ -83,9 +89,13 @@ async def update_news():
 # ========= FastAPI =========
 app = FastAPI()
 
+
 @app.get("/")
 async def auto_news():
-    """アクセスした瞬間に自動で要約を生成し、そのまま返す"""
+    """
+    URLを開いた瞬間にニュースを自動更新し、
+    最新の要約ニュースを返す
+    """
     await update_news()
 
     db = SessionLocal()
