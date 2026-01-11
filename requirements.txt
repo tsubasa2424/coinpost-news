@@ -5,3 +5,4 @@ httpx
 selectolax
 sqlalchemy
 google-generativeai
+line-bot-sdk
