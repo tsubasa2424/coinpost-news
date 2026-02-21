@@ -4,5 +4,6 @@ feedparser
 httpx
 selectolax
 sqlalchemy
-google-generativeai
-line-bot-sdk
+openai>=1.0.0
+jinja2
+python-multipart
