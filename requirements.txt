@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-feedparser
-httpx
-selectolax
-sqlalchemy
-openai>=1.0.0
-jinja2
-python-multipart
